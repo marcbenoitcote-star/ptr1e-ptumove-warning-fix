@@ -1,0 +1,40 @@
+{
+  "id": "ptr1e-ptumove-warning-fix",
+  "title": "PTR1e PTUMove Warning Fix",
+  "description": "Removes the repeated PTUMove#item deprecation warning from PTR 4.4.3.37 without replacing or modifying the PTR system packages.",
+  "authors": [
+    {
+      "name": "Pokemon PTU Custom Server"
+    }
+  ],
+  "version": "0.1.0",
+  "url": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix",
+  "manifest": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix/releases/latest/download/module.json",
+  "download": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix/releases/download/v0.1.0/module.zip",
+  "compatibility": {
+    "minimum": "13.345",
+    "verified": "13.350"
+  },
+  "system": [
+    "ptu"
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "ptu",
+        "type": "system",
+        "manifest": "https://github.com/righthandofvecna/fvtt-ptr/releases/latest/download/system.json",
+        "compatibility": {
+          "minimum": "4.4.3.37",
+          "maximum": "4.4.3.37",
+          "verified": "4.4.3.37"
+        }
+      }
+    ]
+  },
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "readme": "README.md",
+  "license": "LICENSE"
+}
