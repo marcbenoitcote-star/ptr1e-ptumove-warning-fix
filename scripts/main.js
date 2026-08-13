@@ -1,8 +1,13 @@
 const MODULE_ID = "ptr1e-ptumove-warning-fix";
-const MODULE_VERSION = "0.2.0";
+const MODULE_VERSION = "0.3.0";
 const SUPPORTED_SYSTEM_VERSION = "4.4.3.37";
-const PATCH_FLAG = Symbol.for(`${MODULE_ID}.patched`);
+const ITEM_PATCH_FLAG = Symbol.for(`${MODULE_ID}.item-patched`);
+const DAMAGE_BASE_PATCH_FLAG = Symbol.for(`${MODULE_ID}.damage-base-patched`);
+const CONSUME_PATCH_FLAG = Symbol.for(`${MODULE_ID}.consume-patched`);
+const COOLDOWN_PATCH_FLAG = Symbol.for(`${MODULE_ID}.cooldown-patched`);
 const deprecatedAccesses = new Map();
+const runtimeIssues = new Map();
+const frequencyConsumeWarnings = new Set();
 
 Hooks.once("init", () => {
   if (game.system.id !== "ptu") return;
@@ -22,12 +27,28 @@ Hooks.once("init", () => {
     return;
   }
 
-  if (MoveClass.prototype[PATCH_FLAG]) return;
+  const appliedPatches = [
+    patchDeprecatedItemGetter(MoveClass),
+    patchDamageBaseSentinel(MoveClass),
+    patchInvalidFrequencyConsumption(MoveClass),
+    patchInvalidFrequencyCooldown(MoveClass)
+  ].filter(Boolean);
+
+  if (appliedPatches.length > 0) {
+    console.info(
+      `${MODULE_ID} | Correctifs actifs pour PTR ${SUPPORTED_SYSTEM_VERSION}: ${appliedPatches.join(", ")}.`
+    );
+  }
+  console.info(`${MODULE_ID} | Diagnostic command: game.modules.get("${MODULE_ID}").api.report()`);
+});
+
+function patchDeprecatedItemGetter(MoveClass) {
+  if (MoveClass.prototype[ITEM_PATCH_FLAG]) return null;
 
   const descriptor = Object.getOwnPropertyDescriptor(MoveClass.prototype, "item");
   if (typeof descriptor?.get !== "function" || descriptor.configurable !== true) {
     console.warn(`${MODULE_ID} | PTUMove#item did not match the expected 4.4.3.37 getter; no patch was applied.`);
-    return;
+    return null;
   }
 
   Object.defineProperty(MoveClass.prototype, "item", {
@@ -39,14 +60,115 @@ Hooks.once("init", () => {
     }
   });
 
-  Object.defineProperty(MoveClass.prototype, PATCH_FLAG, {
+  Object.defineProperty(MoveClass.prototype, ITEM_PATCH_FLAG, {
     configurable: true,
     value: true
   });
 
-  console.info(`${MODULE_ID} | Patched PTUMove#item for PTR ${SUPPORTED_SYSTEM_VERSION}.`);
-  console.info(`${MODULE_ID} | Diagnostic command: game.modules.get("${MODULE_ID}").api.report()`);
-});
+  return "PTUMove#item";
+}
+
+function patchDamageBaseSentinel(MoveClass) {
+  if (MoveClass.prototype[DAMAGE_BASE_PATCH_FLAG]) return null;
+
+  const descriptor = Object.getOwnPropertyDescriptor(MoveClass.prototype, "isDamaging");
+  if (typeof descriptor?.get !== "function" || descriptor.configurable !== true) {
+    console.warn(`${MODULE_ID} | PTUMove#isDamaging did not match PTR 4.4.3.37; DB '-' was not patched.`);
+    return null;
+  }
+
+  Object.defineProperty(MoveClass.prototype, "isDamaging", {
+    configurable: descriptor.configurable,
+    enumerable: descriptor.enumerable,
+    get() {
+      const rawDamageBase = String(this.system?.damageBase ?? "").trim();
+      if (rawDamageBase === "-") {
+        recordRuntimeIssue(this, {
+          issue: "INVALID_DAMAGE_BASE",
+          path: "system.damageBase",
+          value: rawDamageBase,
+          details: "DB '-' traite comme un Move sans degats. Remplacer par '--' ou par un DB/formule valide."
+        });
+        return false;
+      }
+      return descriptor.get.call(this);
+    }
+  });
+
+  Object.defineProperty(MoveClass.prototype, DAMAGE_BASE_PATCH_FLAG, {
+    configurable: true,
+    value: true
+  });
+
+  return "DB '-'";
+}
+
+function patchInvalidFrequencyConsumption(MoveClass) {
+  if (MoveClass.prototype[CONSUME_PATCH_FLAG]) return null;
+
+  const descriptor = findPropertyDescriptor(MoveClass.prototype, "consume");
+  if (typeof descriptor?.value !== "function") {
+    console.warn(`${MODULE_ID} | PTUMove#consume did not match PTR 4.4.3.37; frequency guard was not applied.`);
+    return null;
+  }
+
+  const originalConsume = descriptor.value;
+  Object.defineProperty(MoveClass.prototype, "consume", {
+    configurable: true,
+    writable: true,
+    async value(...args) {
+      const frequency = getFrequencyState(this);
+      if (!frequency.valid) {
+        const { key, record } = recordInvalidFrequency(this, "consume");
+        if (!frequencyConsumeWarnings.has(key)) {
+          frequencyConsumeWarnings.add(key);
+          console.warn(
+            `${MODULE_ID} | Attaque autorisee sans consommation de frequence pour ${record.actor} / ${record.item}.`,
+            record
+          );
+        }
+        return undefined;
+      }
+      return Reflect.apply(originalConsume, this, args);
+    }
+  });
+
+  Object.defineProperty(MoveClass.prototype, CONSUME_PATCH_FLAG, {
+    configurable: true,
+    value: true
+  });
+
+  return "frequence de consume()";
+}
+
+function patchInvalidFrequencyCooldown(MoveClass) {
+  if (MoveClass.prototype[COOLDOWN_PATCH_FLAG]) return null;
+
+  const descriptor = findPropertyDescriptor(MoveClass.prototype, "onCooldown");
+  if (typeof descriptor?.get !== "function" || descriptor.configurable !== true) {
+    console.warn(`${MODULE_ID} | PTUMove#onCooldown did not match PTR 4.4.3.37; cooldown guard was not applied.`);
+    return null;
+  }
+
+  Object.defineProperty(MoveClass.prototype, "onCooldown", {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get() {
+      if (!getFrequencyState(this).valid) {
+        recordInvalidFrequency(this, "onCooldown");
+        return false;
+      }
+      return descriptor.get.call(this);
+    }
+  });
+
+  Object.defineProperty(MoveClass.prototype, COOLDOWN_PATCH_FLAG, {
+    configurable: true,
+    value: true
+  });
+
+  return "frequence de onCooldown";
+}
 
 function registerDiagnosticApi() {
   const moduleRecord = game.modules.get(MODULE_ID);
@@ -59,8 +181,10 @@ function registerDiagnosticApi() {
     version: MODULE_VERSION,
     report: reportDiagnostics,
     reportAccesses,
+    reportRuntimeIssues,
     scanData,
-    clearAccesses
+    clearAccesses,
+    clearRuntimeIssues
   });
 }
 
@@ -92,6 +216,7 @@ function recordDeprecatedAccess(move) {
 
 function reportDiagnostics() {
   const accesses = buildAccessRows();
+  const observedIssues = buildRuntimeIssueRows();
   const dataIssues = collectDataIssues();
 
   console.group(`${MODULE_ID} | Rapport complet v${MODULE_VERSION}`);
@@ -99,6 +224,7 @@ function reportDiagnostics() {
     "Les acces PTUMove#item indiquent un appel obsolete du systeme, pas un Actor ou un Move corrompu."
   );
   printTable("Acces PTUMove#item agreges", accesses);
+  printTable("Problemes observes pendant cette session", observedIssues);
   printTable("Problemes de donnees corrigibles", dataIssues);
   console.info(`${dataIssues.length} probleme(s) de donnees corrigible(s) detecte(s).`);
   console.groupEnd();
@@ -107,10 +233,12 @@ function reportDiagnostics() {
     version: MODULE_VERSION,
     systemVersion: game.system.version,
     accesses,
+    runtimeIssues: observedIssues,
     dataIssues,
     summary: {
       uniqueDeprecatedAccesses: accesses.length,
       totalDeprecatedAccesses: accesses.reduce((total, row) => total + row.count, 0),
+      runtimeIssues: observedIssues.length,
       dataIssues: dataIssues.length
     }
   };
@@ -123,6 +251,15 @@ function reportAccesses() {
     "Ce tableau est informatif : supprimer ou recreer ces Items ne corrigera pas l'appel obsolete du systeme."
   );
   printTable("Acces agreges", rows);
+  console.groupEnd();
+  return rows;
+}
+
+function reportRuntimeIssues() {
+  const rows = buildRuntimeIssueRows();
+  console.group(`${MODULE_ID} | Problemes observes pendant cette session`);
+  printTable("Problemes observes", rows);
+  console.info("Ces lignes indiquent exactement l'Actor, le Move, l'UUID et la valeur a corriger.");
   console.groupEnd();
   return rows;
 }
@@ -143,11 +280,30 @@ function clearAccesses() {
   return removed;
 }
 
+function clearRuntimeIssues() {
+  const removed = runtimeIssues.size;
+  runtimeIssues.clear();
+  frequencyConsumeWarnings.clear();
+  console.info(`${MODULE_ID} | ${removed} probleme(s) observe(s) supprime(s) du rapport en memoire.`);
+  return removed;
+}
+
 function buildAccessRows() {
   return Array.from(deprecatedAccesses.values())
     .map((record) => ({ ...record }))
     .sort((left, right) =>
       right.count - left.count
+      || left.actor.localeCompare(right.actor)
+      || left.item.localeCompare(right.item)
+    );
+}
+
+function buildRuntimeIssueRows() {
+  return Array.from(runtimeIssues.values())
+    .map((record) => ({ ...record }))
+    .sort((left, right) =>
+      right.count - left.count
+      || left.issue.localeCompare(right.issue)
       || left.actor.localeCompare(right.actor)
       || left.item.localeCompare(right.item)
     );
@@ -174,6 +330,19 @@ function collectDataIssues() {
           value: "-",
           details: "Remplacer '-' par '--' pour un Move sans degats, ou par un DB/formule valide."
         });
+      }
+
+      if (item?.type === "move") {
+        const frequency = getFrequencyState(item);
+        if (!frequency.valid) {
+          issues.push({
+            ...base,
+            issue: "INVALID_FREQUENCY_TYPE",
+            path: "system.frequency.type",
+            value: frequency.displayValue,
+            details: `Choisir une frequence valide: ${validFrequencyTypes().join(", ")}.`
+          });
+        }
       }
 
       const sourceRules = item?._source?.system?.rules ?? item?.system?.rules ?? [];
@@ -216,6 +385,83 @@ function collectDataIssues() {
     || left.item.localeCompare(right.item)
     || left.path.localeCompare(right.path)
   );
+}
+
+function recordInvalidFrequency(move, trigger) {
+  const frequency = getFrequencyState(move);
+  return recordRuntimeIssue(move, {
+    issue: "INVALID_FREQUENCY_TYPE",
+    path: "system.frequency.type",
+    value: frequency.displayValue,
+    trigger,
+    details: `Attaque continue sans consommer la frequence. Choisir: ${validFrequencyTypes().join(", ")}.`
+  });
+}
+
+function recordRuntimeIssue(move, issueData) {
+  const actor = move?.actor ?? move?.parent ?? null;
+  const actorId = actor?.id ?? actor?._id ?? null;
+  const actorUuid = actor?.uuid ?? (actorId ? `Actor.${actorId}` : "(actor inconnu)");
+  const itemId = move?.id ?? move?._id ?? move?.realId ?? null;
+  const itemUuid = move?.uuid ?? (itemId ? `${actorUuid}.Item.${itemId}` : "(move temporaire)");
+  const key = `${issueData.issue}|${actorUuid}|${itemUuid}|${issueData.path}|${issueData.value}`;
+  const timestamp = new Date().toISOString();
+  const existing = runtimeIssues.get(key);
+  const record = existing ?? {
+    actor: actor?.name ?? "(acteur inconnu)",
+    actorUuid,
+    actorType: actor?.type ?? "",
+    item: move?.name ?? "(move inconnu)",
+    itemUuid,
+    itemId: itemId ?? "",
+    itemType: move?.type ?? "move",
+    damageBase: move?.system?.damageBase ?? "",
+    frequencyType: move?.system?.frequency?.type ?? "",
+    issue: issueData.issue,
+    path: issueData.path,
+    value: issueData.value,
+    trigger: issueData.trigger ?? "prepareData",
+    details: issueData.details,
+    count: 0,
+    firstSeen: timestamp,
+    lastSeen: timestamp
+  };
+
+  record.count += 1;
+  record.lastSeen = timestamp;
+  record.trigger = issueData.trigger ?? record.trigger;
+  runtimeIssues.set(key, record);
+  return { key, isNew: !existing, record: { ...record } };
+}
+
+function getFrequencyState(move) {
+  const type = move?.system?.frequency?.type;
+  const frequencies = globalThis.CONFIG?.PTU?.data?.frequencies ?? {};
+  const valid = typeof type === "string"
+    && type.length > 0
+    && Object.prototype.hasOwnProperty.call(frequencies, type)
+    && frequencies[type] != null;
+
+  return {
+    type,
+    valid,
+    config: valid ? frequencies[type] : null,
+    displayValue: type === undefined ? "(undefined)" : type === null ? "(null)" : String(type)
+  };
+}
+
+function validFrequencyTypes() {
+  return Object.keys(globalThis.CONFIG?.PTU?.data?.frequencies ?? {}).sort();
+}
+
+function findPropertyDescriptor(prototype, property) {
+  let current = prototype;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor) return descriptor;
+    current = Object.getPrototypeOf(current);
+  }
+  return null;
 }
 
 function collectActors() {
