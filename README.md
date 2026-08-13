@@ -12,7 +12,12 @@ PTUMove#item is deprecated. The collection now contains PTUMove items directly; 
 
 Dans PTR 4.4.3.37, le getter obsolete `PTUMove#item` affiche un avertissement puis retourne simplement le mouvement lui-meme. Ce module conserve exactement ce resultat (`return this`) mais retire l'appel qui produit l'avertissement.
 
-La version 0.2.0 memorise silencieusement les acces obsoletes et ajoute un audit manuel en lecture seule. Aucun Actor, Item ou Rule Element n'est modifie.
+La version 0.3.0 memorise silencieusement les acces obsoletes et ajoute deux garde-fous cibles :
+
+- un DB egal a `"-"` est traite comme un Move sans degats au lieu d'etre evalue comme une formule invalide ;
+- une frequence absente ou inconnue ne bloque plus l'envoi de l'attaque et des degats. Le Move continue sans consommer sa frequence et la console indique les donnees a corriger.
+
+Aucun Actor, Item ou Rule Element n'est modifie automatiquement.
 
 Le correctif refuse de s'activer avec une autre version du systeme afin de ne pas masquer un changement ulterieur de PTR.
 
@@ -40,14 +45,16 @@ Executer cette commande dans la console du navigateur :
 game.modules.get("ptr1e-ptumove-warning-fix").api.report()
 ```
 
-Le rapport affiche deux tableaux :
+Le rapport affiche trois tableaux :
 
 1. Les acces `PTUMove#item`, regroupes par Actor et Move. Ils sont informatifs et n'indiquent pas que les donnees sont corrompues.
-2. Les problemes de donnees corrigibles trouves dans les Actors du monde et les Tokens de la scene active.
+2. Les problemes rencontres pendant la session, avec l'Actor, le Move, leurs UUID et la valeur fautive.
+3. Les problemes de donnees corrigibles trouves dans les Actors du monde et les Tokens de la scene active.
 
 L'audit recherche actuellement :
 
 - les Moves dont `system.damageBase` vaut `"-"` ;
+- les Moves dont `system.frequency.type` est absent ou inconnu ;
 - les Rule Elements `ApplyEffect` sans `selectors` utilisables ;
 - les Rule Elements `ApplyEffect` sans UUID.
 
@@ -55,8 +62,10 @@ Commandes supplementaires :
 
 ```js
 game.modules.get("ptr1e-ptumove-warning-fix").api.reportAccesses()
+game.modules.get("ptr1e-ptumove-warning-fix").api.reportRuntimeIssues()
 game.modules.get("ptr1e-ptumove-warning-fix").api.scanData()
 game.modules.get("ptr1e-ptumove-warning-fix").api.clearAccesses()
+game.modules.get("ptr1e-ptumove-warning-fix").api.clearRuntimeIssues()
 ```
 
 `clearAccesses()` vide uniquement le rapport en memoire pour la page courante. Il ne supprime aucun document Foundry.
@@ -64,6 +73,8 @@ game.modules.get("ptr1e-ptumove-warning-fix").api.clearAccesses()
 ## Resultat attendu
 
 - Aucun message `PTUMove#item is deprecated`.
+- Aucun message `resolveDbFormula: failed to evaluate formula "-"`.
+- Un Move avec un DB valide continue jusqu'aux degats meme si sa frequence est invalide.
 - Un rapport manuel donnant le nom et l'UUID des Actors et Items concernes.
 - Les mouvements, jets et degats continuent de fonctionner normalement.
 - Le systeme actif reste `ptu` version `4.4.3.37`.
