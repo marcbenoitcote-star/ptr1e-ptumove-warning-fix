@@ -45,12 +45,61 @@ class Move extends BaseItem {
   }
 }
 
+class CharacterSheet {
+  constructor(actor) {
+    this.actor = actor;
+    this.options = { editable: true };
+    this.originalActivateCalls = 0;
+  }
+
+  activateListeners() {
+    this.originalActivateCalls += 1;
+  }
+}
+
+class TestRuleElement {
+  constructor(source, item, options = {}) {
+    this.source = source;
+    this.item = item;
+    this.sourceIndex = options.sourceIndex;
+  }
+}
+
+class RuleElements {
+  static custom = {};
+  static builtin = {
+    ActiveEffectLike: TestRuleElement,
+    RollOption: TestRuleElement
+  };
+  static originalCalls = 0;
+
+  static fromOwnedItem(item, options = {}) {
+    this.originalCalls += 1;
+    const rules = [];
+    for (const [sourceIndex, source] of item.system.rules?.entries() ?? []) {
+      const RuleElementDocument = this.custom[source.key] ?? this.builtin[source.key];
+      if (!RuleElementDocument) continue;
+      rules.push(new RuleElementDocument(source, item, { ...options, sourceIndex }));
+    }
+    return rules;
+  }
+}
+
 const actor = {
   id: "ACTOR1",
   uuid: "Actor.ACTOR1",
   name: "Actor Test",
   type: "character",
-  items: { contents: [] }
+  system: {
+    modifiers: {
+      baseStats: {
+        speed: { mod: 0 }
+      }
+    }
+  },
+  flags: { ptu: { rulesSelections: {} } },
+  items: { contents: [] },
+  attacks: new Map()
 };
 
 const makeMove = (id, name, damageBase, frequencyType) => new Move({
@@ -68,13 +117,65 @@ const makeMove = (id, name, damageBase, frequencyType) => new Move({
 const validMove = makeMove("VALID1", "Move valide", "7", "scene");
 const invalidFrequencyMove = makeMove("BADFREQ", "Move frequence invalide", "8", "scene-x2");
 const invalidDamageBaseMove = makeMove("BADDB", "Move DB invalide", "-", "at-will");
-actor.items.contents.push(validMove, invalidFrequencyMove, invalidDamageBaseMove);
+const makeRuleItem = (id, name, rules, flags = {}) => ({
+  id,
+  uuid: `Actor.ACTOR1.Item.${id}`,
+  name,
+  type: "effect",
+  actor,
+  parent: actor,
+  flags,
+  system: { rules },
+  _source: { system: { rules } }
+});
+
+const validRuleItem = makeRuleItem("VALIDRULE", "Regle valide", [{
+  key: "ActiveEffectLike",
+  mode: "add",
+  path: "system.modifiers.baseStats.speed.mod",
+  value: 1
+}]);
+const unresolvedRuleItem = makeRuleItem("UNRESOLVED", "Choix manquant", [{
+  key: "ActiveEffectLike",
+  mode: "add",
+  path: "system.modifiers.baseStats.{item|flags.ptu.rulesSelections.ace-trainer}.mod",
+  value: 1
+}]);
+const injectedRuleItem = makeRuleItem("INJECTED", "Choix valide", [{
+  key: "ActiveEffectLike",
+  mode: "add",
+  path: "system.modifiers.baseStats.{item|flags.ptu.rulesSelections.ace-trainer}.mod",
+  value: 1
+}], { ptu: { rulesSelections: { "ace-trainer": "speed" } } });
+const incompleteRuleItem = makeRuleItem("INCOMPLETE", "Regle incomplete", [{
+  key: "ActiveEffectLike",
+  mode: "add",
+  value: ""
+}]);
+const invalidPathRuleItem = makeRuleItem("BADPATH", "Chemin absent", [{
+  key: "ActiveEffectLike",
+  mode: "add",
+  path: "system.chemin.qui.nexiste.pas",
+  value: 1
+}]);
+actor.items.contents.push(
+  validMove,
+  invalidFrequencyMove,
+  invalidDamageBaseMove,
+  validRuleItem,
+  unresolvedRuleItem,
+  injectedRuleItem,
+  incompleteRuleItem,
+  invalidPathRuleItem
+);
 
 const moduleRecord = {};
 const context = vm.createContext({
   CONFIG: {
     PTU: {
+      Actor: { sheetClasses: { character: CharacterSheet } },
       Item: { documentClasses: { move: Move } },
+      rule: { elements: RuleElements },
       data: {
         frequencies: {
           "at-will": { eot: false, limited: false },
@@ -130,7 +231,7 @@ vm.runInContext(source, context, { filename: "scripts/main.js" });
 assert.equal(typeof initCallback, "function");
 initCallback();
 
-assert.equal(moduleRecord.api.version, "0.3.0");
+assert.equal(moduleRecord.api.version, "0.4.0");
 assert.equal(invalidDamageBaseMove.isDamaging, false, "DB '-' doit etre non dommageant");
 assert.equal(validMove.isDamaging, true);
 
@@ -155,6 +256,76 @@ assert.equal(runtimeIssues.some((row) => row.issue === "INVALID_DAMAGE_BASE"), t
 const dataIssues = moduleRecord.api.scanData();
 assert.equal(dataIssues.some((row) => row.issue === "INVALID_FREQUENCY_TYPE" && row.itemUuid.endsWith("BADFREQ")), true);
 assert.equal(dataIssues.some((row) => row.issue === "INVALID_DAMAGE_BASE" && row.itemUuid.endsWith("BADDB")), true);
+assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_UNRESOLVED_INJECTION" && row.itemUuid.endsWith("UNRESOLVED")), true);
+assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_MISSING_PATH" && row.itemUuid.endsWith("INCOMPLETE")), true);
+assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_EMPTY_VALUE" && row.itemUuid.endsWith("INCOMPLETE")), true);
+assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_INVALID_PATH" && row.itemUuid.endsWith("BADPATH")), true);
+
+const originalCallsBeforeValidRule = RuleElements.originalCalls;
+assert.equal(RuleElements.fromOwnedItem(validRuleItem).length, 1);
+assert.equal(RuleElements.originalCalls, originalCallsBeforeValidRule + 1, "Une regle valide conserve la methode PTR originale");
+assert.equal(RuleElements.fromOwnedItem(unresolvedRuleItem).length, 0, "Une injection absente est gardee inactive sans construire la regle");
+const injectedRules = RuleElements.fromOwnedItem(injectedRuleItem);
+assert.equal(injectedRules.length, 1);
+assert.equal(injectedRules[0].source.path, "system.modifiers.baseStats.speed.mod", "Un chemin injectable valide est resolu avant PTR");
+assert.equal(RuleElements.fromOwnedItem(incompleteRuleItem).length, 0, "Une regle incomplete ne declenche plus l'erreur DataModel repetee");
+assert.equal(RuleElements.fromOwnedItem(invalidPathRuleItem).length, 0, "Un chemin Actor invalide reste inactif sans spam");
+
+let struggleUseCalls = 0;
+const temporaryStruggle = new Move({
+  id: "STRUGGLE1",
+  uuid: "Actor.ACTOR1.Item.STRUGGLE1",
+  name: "Struggle (Normal)",
+  type: "move",
+  system: {
+    isStruggle: true,
+    category: "Physical",
+    type: "Normal",
+    damageBase: 4,
+    frequency: { type: "at-will", max: 0 },
+    rules: []
+  }
+}, actor);
+temporaryStruggle.use = async () => { struggleUseCalls += 1; };
+actor.attacks.set("STRUGGLE1", temporaryStruggle);
+const clickHandlers = [];
+const sheet = new CharacterSheet(actor);
+sheet.activateListeners({
+  find(selector) {
+    assert.equal(selector, ".rollable.move");
+    return { click(handler) { clickHandlers.push(handler); } };
+  }
+});
+assert.equal(sheet.originalActivateCalls, 1);
+assert.equal(clickHandlers.length, 1);
+let prevented = false;
+let stopped = false;
+await clickHandlers[0]({
+  currentTarget: { closest: () => ({ dataset: { itemId: "STRUGGLE1" } }) },
+  preventDefault() { prevented = true; },
+  stopImmediatePropagation() { stopped = true; }
+});
+assert.equal(struggleUseCalls, 1, "Le Struggle temporaire de la fiche Dresseur est lance");
+assert.equal(prevented, true);
+assert.equal(stopped, true);
+assert.equal(moduleRecord.api.reportStruggleUses()[0].actorUuid, "Actor.ACTOR1");
+
+actor.attacks.set("VALID1", validMove);
+let normalMoveUseCalls = 0;
+validMove.use = async () => { normalMoveUseCalls += 1; };
+await clickHandlers[0]({
+  currentTarget: { closest: () => ({ dataset: { itemId: "VALID1" } }) },
+  preventDefault() { throw new Error("Le correctif Struggle ne doit pas intercepter un Move normal"); },
+  stopImmediatePropagation() { throw new Error("Le correctif Struggle ne doit pas intercepter un Move normal"); }
+});
+assert.equal(normalMoveUseCalls, 0, "Un Move permanent n'est pas lance une seconde fois par le correctif Struggle");
+
+const observedRuleIssues = moduleRecord.api.reportRuntimeIssues();
+assert.equal(observedRuleIssues.some((row) =>
+  row.issue === "AE_LIKE_UNRESOLVED_INJECTION"
+  && row.actorUuid === "Actor.ACTOR1"
+  && row.itemUuid.endsWith("UNRESOLVED")
+), true);
 
 assert.equal(invalidFrequencyMove.item, invalidFrequencyMove);
 assert.equal(moduleRecord.api.reportAccesses()[0].itemUuid, "Actor.ACTOR1.Item.BADFREQ");

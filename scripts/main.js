@@ -1,13 +1,17 @@
 const MODULE_ID = "ptr1e-ptumove-warning-fix";
-const MODULE_VERSION = "0.3.0";
+const MODULE_VERSION = "0.4.0";
 const SUPPORTED_SYSTEM_VERSION = "4.4.3.37";
 const ITEM_PATCH_FLAG = Symbol.for(`${MODULE_ID}.item-patched`);
 const DAMAGE_BASE_PATCH_FLAG = Symbol.for(`${MODULE_ID}.damage-base-patched`);
 const CONSUME_PATCH_FLAG = Symbol.for(`${MODULE_ID}.consume-patched`);
 const COOLDOWN_PATCH_FLAG = Symbol.for(`${MODULE_ID}.cooldown-patched`);
+const STRUGGLE_SHEET_PATCH_FLAG = Symbol.for(`${MODULE_ID}.struggle-sheet-patched`);
+const RULE_ELEMENTS_PATCH_FLAG = Symbol.for(`${MODULE_ID}.rule-elements-patched`);
 const deprecatedAccesses = new Map();
 const runtimeIssues = new Map();
+const struggleUses = new Map();
 const frequencyConsumeWarnings = new Set();
+const AE_LIKE_MODES = new Set(["multiply", "add", "subtract", "remove", "downgrade", "upgrade", "override"]);
 
 Hooks.once("init", () => {
   if (game.system.id !== "ptu") return;
@@ -31,7 +35,9 @@ Hooks.once("init", () => {
     patchDeprecatedItemGetter(MoveClass),
     patchDamageBaseSentinel(MoveClass),
     patchInvalidFrequencyConsumption(MoveClass),
-    patchInvalidFrequencyCooldown(MoveClass)
+    patchInvalidFrequencyCooldown(MoveClass),
+    patchCharacterStruggleUse(CONFIG.PTU?.Actor?.sheetClasses?.character),
+    patchInvalidActiveEffectLikeRules(CONFIG.PTU?.rule?.elements)
   ].filter(Boolean);
 
   if (appliedPatches.length > 0) {
@@ -66,6 +72,126 @@ function patchDeprecatedItemGetter(MoveClass) {
   });
 
   return "PTUMove#item";
+}
+
+function patchCharacterStruggleUse(CharacterSheetClass) {
+  if (!CharacterSheetClass?.prototype || CharacterSheetClass.prototype[STRUGGLE_SHEET_PATCH_FLAG]) return null;
+
+  const descriptor = findPropertyDescriptor(CharacterSheetClass.prototype, "activateListeners");
+  if (typeof descriptor?.value !== "function") {
+    console.warn(`${MODULE_ID} | Character sheet listeners did not match PTR 4.4.3.37; Struggle was not patched.`);
+    return null;
+  }
+
+  const originalActivateListeners = descriptor.value;
+  Object.defineProperty(CharacterSheetClass.prototype, "activateListeners", {
+    configurable: true,
+    writable: true,
+    value(html) {
+      const result = Reflect.apply(originalActivateListeners, this, [html]);
+      if (!this.options?.editable) return result;
+
+      const rollableMoves = html?.find?.(".rollable.move");
+      if (typeof rollableMoves?.click !== "function") return result;
+
+      rollableMoves.click(async (event) => {
+        const itemElement = event?.currentTarget?.closest?.("li.item");
+        const attackId = itemElement?.dataset?.itemId;
+        if (!attackId) return;
+
+        const move = this.actor?.attacks?.get?.(attackId);
+        if (!move?.system?.isStruggle) return;
+
+        event.preventDefault?.();
+        event.stopImmediatePropagation?.();
+        recordStruggleUse(move);
+        return move.use?.({ event });
+      });
+
+      return result;
+    }
+  });
+
+  Object.defineProperty(CharacterSheetClass.prototype, STRUGGLE_SHEET_PATCH_FLAG, {
+    configurable: true,
+    value: true
+  });
+
+  return "Struggle de la fiche Dresseur";
+}
+
+function patchInvalidActiveEffectLikeRules(RuleElements) {
+  if (!RuleElements || RuleElements[RULE_ELEMENTS_PATCH_FLAG]) return null;
+
+  const descriptor = Object.getOwnPropertyDescriptor(RuleElements, "fromOwnedItem");
+  if (typeof descriptor?.value !== "function" || descriptor.configurable !== true) {
+    console.warn(`${MODULE_ID} | RuleElements.fromOwnedItem did not match PTR 4.4.3.37; ActiveEffectLike was not patched.`);
+    return null;
+  }
+
+  const originalFromOwnedItem = descriptor.value;
+  Object.defineProperty(RuleElements, "fromOwnedItem", {
+    configurable: true,
+    writable: true,
+    value(item, options = {}) {
+      const entries = Array.from(item?.system?.rules?.entries?.() ?? []);
+      const analyses = new Map();
+      let requiresFiltering = false;
+
+      for (const [sourceIndex, source] of entries) {
+        if (source?.key !== "ActiveEffectLike") continue;
+        const analysis = analyzeActiveEffectLikeSource(source, item?.actor ?? item?.parent, item);
+        analyses.set(sourceIndex, analysis);
+        if (analysis.problems.length > 0 || analysis.source !== source) requiresFiltering = true;
+      }
+
+      if (!requiresFiltering) {
+        return Reflect.apply(originalFromOwnedItem, this, [item, options]);
+      }
+
+      const rules = [];
+      for (const [sourceIndex, originalSource] of entries) {
+        if (typeof originalSource?.key !== "string") {
+          console.error(`PTU | RuleElements | Invalid rule key: ${originalSource?.key} on item ${item.name} (${item.uuid})`);
+          continue;
+        }
+
+        const analysis = analyses.get(sourceIndex);
+        if (analysis?.problems.length > 0) {
+          for (const problem of analysis.problems) {
+            recordActiveEffectLikeIssue(item, sourceIndex, problem);
+          }
+          continue;
+        }
+
+        const source = analysis?.source ?? originalSource;
+        const RuleElementDocument = this.custom[source.key] ?? this.builtin[source.key];
+        if (RuleElementDocument) {
+          const rule = (() => {
+            try {
+              return new RuleElementDocument(source, item, { ...(options ?? {}), sourceIndex });
+            } catch (error) {
+              if (!options.suppressWarnings) {
+                console.warn(`PTU | RuleElements | Error creating rule element: ${source.key} on item ${item.name} (${item.uuid})`, error);
+              }
+              return null;
+            }
+          })();
+          if (rule) rules.push(rule);
+        } else {
+          console.warn(`PTU | RuleElements | Unrecognized rule element: ${source.key} on item ${item.name} (${item.uuid})`);
+        }
+      }
+      return rules;
+    }
+  });
+
+  Object.defineProperty(RuleElements, RULE_ELEMENTS_PATCH_FLAG, {
+    configurable: true,
+    value: true
+  });
+
+  return "ActiveEffectLike invalide";
 }
 
 function patchDamageBaseSentinel(MoveClass) {
@@ -181,9 +307,11 @@ function registerDiagnosticApi() {
     version: MODULE_VERSION,
     report: reportDiagnostics,
     reportAccesses,
+    reportStruggleUses,
     reportRuntimeIssues,
     scanData,
     clearAccesses,
+    clearStruggleUses,
     clearRuntimeIssues
   });
 }
@@ -214,8 +342,36 @@ function recordDeprecatedAccess(move) {
   deprecatedAccesses.set(key, record);
 }
 
+function recordStruggleUse(move) {
+  const actor = move?.actor ?? move?.parent ?? null;
+  const actorId = actor?.id ?? actor?._id ?? null;
+  const actorUuid = actor?.uuid ?? (actorId ? `Actor.${actorId}` : "(actor inconnu)");
+  const itemId = move?.id ?? move?._id ?? move?.realId ?? null;
+  const itemUuid = move?.uuid ?? (itemId ? `${actorUuid}.Item.${itemId}` : "(move temporaire)");
+  const key = `${actorUuid}|${itemUuid}|${move?.name ?? "Struggle"}`;
+  const timestamp = new Date().toISOString();
+  const record = struggleUses.get(key) ?? {
+    actor: actor?.name ?? "(acteur inconnu)",
+    actorUuid,
+    actorType: actor?.type ?? "",
+    item: move?.name ?? "Struggle",
+    itemUuid,
+    itemId: itemId ?? "",
+    category: move?.system?.category ?? "",
+    type: move?.system?.type ?? "",
+    count: 0,
+    firstSeen: timestamp,
+    lastSeen: timestamp
+  };
+
+  record.count += 1;
+  record.lastSeen = timestamp;
+  struggleUses.set(key, record);
+}
+
 function reportDiagnostics() {
   const accesses = buildAccessRows();
+  const routedStruggles = buildStruggleUseRows();
   const observedIssues = buildRuntimeIssueRows();
   const dataIssues = collectDataIssues();
 
@@ -224,6 +380,7 @@ function reportDiagnostics() {
     "Les acces PTUMove#item indiquent un appel obsolete du systeme, pas un Actor ou un Move corrompu."
   );
   printTable("Acces PTUMove#item agreges", accesses);
+  printTable("Struggles lances par la fiche Dresseur corrigee", routedStruggles);
   printTable("Problemes observes pendant cette session", observedIssues);
   printTable("Problemes de donnees corrigibles", dataIssues);
   console.info(`${dataIssues.length} probleme(s) de donnees corrigible(s) detecte(s).`);
@@ -233,15 +390,26 @@ function reportDiagnostics() {
     version: MODULE_VERSION,
     systemVersion: game.system.version,
     accesses,
+    struggleUses: routedStruggles,
     runtimeIssues: observedIssues,
     dataIssues,
     summary: {
       uniqueDeprecatedAccesses: accesses.length,
       totalDeprecatedAccesses: accesses.reduce((total, row) => total + row.count, 0),
+      struggleUses: routedStruggles.length,
       runtimeIssues: observedIssues.length,
       dataIssues: dataIssues.length
     }
   };
+}
+
+function reportStruggleUses() {
+  const rows = buildStruggleUseRows();
+  console.group(`${MODULE_ID} | Struggles de la fiche Dresseur`);
+  printTable("Struggles lances par le correctif", rows);
+  console.info("Chaque ligne confirme qu'un Struggle temporaire a ete retrouve dans actor.attacks puis lance.");
+  console.groupEnd();
+  return rows;
 }
 
 function reportAccesses() {
@@ -280,6 +448,13 @@ function clearAccesses() {
   return removed;
 }
 
+function clearStruggleUses() {
+  const removed = struggleUses.size;
+  struggleUses.clear();
+  console.info(`${MODULE_ID} | ${removed} Struggle(s) unique(s) supprime(s) du rapport en memoire.`);
+  return removed;
+}
+
 function clearRuntimeIssues() {
   const removed = runtimeIssues.size;
   runtimeIssues.clear();
@@ -290,6 +465,16 @@ function clearRuntimeIssues() {
 
 function buildAccessRows() {
   return Array.from(deprecatedAccesses.values())
+    .map((record) => ({ ...record }))
+    .sort((left, right) =>
+      right.count - left.count
+      || left.actor.localeCompare(right.actor)
+      || left.item.localeCompare(right.item)
+    );
+}
+
+function buildStruggleUseRows() {
+  return Array.from(struggleUses.values())
     .map((record) => ({ ...record }))
     .sort((left, right) =>
       right.count - left.count
@@ -349,6 +534,19 @@ function collectDataIssues() {
       if (!Array.isArray(sourceRules)) continue;
 
       sourceRules.forEach((rule, ruleIndex) => {
+        if (rule?.key === "ActiveEffectLike") {
+          const analysis = analyzeActiveEffectLikeSource(rule, actor, item);
+          for (const problem of analysis.problems) {
+            issues.push({
+              ...base,
+              issue: problem.issue,
+              path: `system.rules.${ruleIndex}.${problem.field}`,
+              value: formatDiagnosticValue(problem.value),
+              details: problem.details
+            });
+          }
+        }
+
         if (rule?.key !== "ApplyEffect") return;
 
         const selectors = Array.isArray(rule.selectors) ? rule.selectors : [];
@@ -385,6 +583,153 @@ function collectDataIssues() {
     || left.item.localeCompare(right.item)
     || left.path.localeCompare(right.path)
   );
+}
+
+function analyzeActiveEffectLikeSource(source, actor, item) {
+  const problems = [];
+  let preparedSource = source;
+  const path = typeof source?.path === "string" ? source.path.trim() : "";
+
+  if (!path) {
+    problems.push({
+      issue: "AE_LIKE_MISSING_PATH",
+      field: "path",
+      value: source?.path,
+      details: "Ajouter le chemin Actor cible du Rule Element ActiveEffectLike. La regle reste inactive jusque-la."
+    });
+  }
+
+  if (!AE_LIKE_MODES.has(source?.mode)) {
+    problems.push({
+      issue: "AE_LIKE_INVALID_MODE",
+      field: "mode",
+      value: source?.mode,
+      details: `Choisir un mode ActiveEffectLike valide: ${Array.from(AE_LIKE_MODES).join(", ")}.`
+    });
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(source ?? {}, "value")) {
+    problems.push({
+      issue: "AE_LIKE_MISSING_VALUE",
+      field: "value",
+      value: undefined,
+      details: "Ajouter la valeur appliquee par le Rule Element ActiveEffectLike."
+    });
+  } else if (typeof source.value === "string" && source.value.trim().length === 0) {
+    problems.push({
+      issue: "AE_LIKE_EMPTY_VALUE",
+      field: "value",
+      value: source.value,
+      details: "Remplacer la formule vide par une valeur ou une formule valide."
+    });
+  }
+
+  const injectableFields = ["path", "value", "label", "predicate"];
+  for (const field of injectableFields) {
+    if (!Object.prototype.hasOwnProperty.call(source ?? {}, field)) continue;
+    const unresolved = findUnresolvedInjections(source[field], actor, item, source);
+    for (const missing of unresolved) {
+      problems.push({
+        issue: "AE_LIKE_UNRESOLVED_INJECTION",
+        field,
+        value: missing.token,
+        details: `La propriete injectee ${missing.token} est absente. Configurer le choix requis sur cet Item avant de reactiver la regle.`
+      });
+    }
+  }
+
+  if (path && !problems.some((problem) => problem.field === "path")) {
+    const resolution = resolveInjectedString(path, actor, item, source);
+    const resolvedPath = resolution.value.trim();
+    const validPath = resolvedPath.length > 0 && [
+      resolvedPath,
+      resolvedPath.replace(/\.\w+$/, ""),
+      resolvedPath.replace(/\.?\w+\.\w+$/, "")
+    ].some((candidate) => getProperty(actor, candidate) !== undefined);
+
+    if (!validPath) {
+      problems.push({
+        issue: "AE_LIKE_INVALID_PATH",
+        field: "path",
+        value: resolvedPath,
+        details: "Le chemin cible et ses parents n'existent pas sur cet Actor. La regle reste inactive."
+      });
+    } else if (resolvedPath !== source.path) {
+      preparedSource = { ...source, path: resolvedPath };
+    }
+  }
+
+  return {
+    source: preparedSource,
+    problems: deduplicateRuleProblems(problems)
+  };
+}
+
+function findUnresolvedInjections(value, actor, item, rule) {
+  if (typeof value === "string") {
+    return resolveInjectedString(value, actor, item, rule).unresolved;
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => findUnresolvedInjections(entry, actor, item, rule));
+  }
+  if (value && Object.prototype.toString.call(value) === "[object Object]") {
+    return Object.values(value).flatMap((entry) => findUnresolvedInjections(entry, actor, item, rule));
+  }
+  return [];
+}
+
+function resolveInjectedString(source, actor, item, rule) {
+  let value = typeof source === "string" ? source : "";
+  const unresolved = [];
+
+  for (let pass = 0; pass < 8 && value.includes("{"); pass += 1) {
+    let matched = false;
+    const previousValue = value;
+    value = value.replace(/{(actor|item|rule)\|([^{}]+)}/g, (token, scope, path) => {
+      matched = true;
+      const target = scope === "actor" ? actor : scope === "item" ? item : rule;
+      const resolved = getProperty(target, path);
+      if (resolved === undefined || resolved === null || resolved === "") {
+        unresolved.push({ token, scope, path });
+        return token;
+      }
+      return String(resolved);
+    });
+    if (!matched || value === previousValue) break;
+  }
+
+  return { value, unresolved: deduplicateInjectionProblems(unresolved) };
+}
+
+function deduplicateInjectionProblems(problems) {
+  return Array.from(new Map(problems.map((problem) => [problem.token, problem])).values());
+}
+
+function deduplicateRuleProblems(problems) {
+  return Array.from(new Map(
+    problems.map((problem) => [`${problem.issue}|${problem.field}|${formatDiagnosticValue(problem.value)}`, problem])
+  ).values());
+}
+
+function recordActiveEffectLikeIssue(item, ruleIndex, problem) {
+  return recordRuntimeIssue(item, {
+    issue: problem.issue,
+    path: `system.rules.${ruleIndex}.${problem.field}`,
+    value: formatDiagnosticValue(problem.value),
+    trigger: "prepareRuleElements",
+    details: problem.details
+  });
+}
+
+function formatDiagnosticValue(value) {
+  if (value === undefined) return "(undefined)";
+  if (value === null) return "(null)";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function recordInvalidFrequency(move, trigger) {
