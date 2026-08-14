@@ -1,5 +1,5 @@
 const MODULE_ID = "ptr1e-ptumove-warning-fix";
-const MODULE_VERSION = "0.4.0";
+const MODULE_VERSION = "0.5.0";
 const SUPPORTED_SYSTEM_VERSION = "4.4.3.37";
 const ITEM_PATCH_FLAG = Symbol.for(`${MODULE_ID}.item-patched`);
 const DAMAGE_BASE_PATCH_FLAG = Symbol.for(`${MODULE_ID}.damage-base-patched`);
@@ -12,6 +12,8 @@ const runtimeIssues = new Map();
 const struggleUses = new Map();
 const frequencyConsumeWarnings = new Set();
 const AE_LIKE_MODES = new Set(["multiply", "add", "subtract", "remove", "downgrade", "upgrade", "override"]);
+const GRANT_ITEM_OPERATIONS = new Set(["add", "subtract", "remove", "multiply", "override", "upgrade", "downgrade"]);
+const ROLL_OPTION_DOMAIN_PATTERN = /^[-a-z0-9]+$/;
 
 Hooks.once("init", () => {
   if (game.system.id !== "ptu") return;
@@ -37,7 +39,7 @@ Hooks.once("init", () => {
     patchInvalidFrequencyConsumption(MoveClass),
     patchInvalidFrequencyCooldown(MoveClass),
     patchCharacterStruggleUse(CONFIG.PTU?.Actor?.sheetClasses?.character),
-    patchInvalidActiveEffectLikeRules(CONFIG.PTU?.rule?.elements)
+    patchInvalidRuleElements(CONFIG.PTU?.rule?.elements)
   ].filter(Boolean);
 
   if (appliedPatches.length > 0) {
@@ -120,12 +122,12 @@ function patchCharacterStruggleUse(CharacterSheetClass) {
   return "Struggle de la fiche Dresseur";
 }
 
-function patchInvalidActiveEffectLikeRules(RuleElements) {
+function patchInvalidRuleElements(RuleElements) {
   if (!RuleElements || RuleElements[RULE_ELEMENTS_PATCH_FLAG]) return null;
 
   const descriptor = Object.getOwnPropertyDescriptor(RuleElements, "fromOwnedItem");
   if (typeof descriptor?.value !== "function" || descriptor.configurable !== true) {
-    console.warn(`${MODULE_ID} | RuleElements.fromOwnedItem did not match PTR 4.4.3.37; ActiveEffectLike was not patched.`);
+    console.warn(`${MODULE_ID} | RuleElements.fromOwnedItem did not match PTR 4.4.3.37; invalid rules were not patched.`);
     return null;
   }
 
@@ -139,8 +141,8 @@ function patchInvalidActiveEffectLikeRules(RuleElements) {
       let requiresFiltering = false;
 
       for (const [sourceIndex, source] of entries) {
-        if (source?.key !== "ActiveEffectLike") continue;
-        const analysis = analyzeActiveEffectLikeSource(source, item?.actor ?? item?.parent, item);
+        const analysis = analyzeRuleElementSource(source, item?.actor ?? item?.parent, item);
+        if (!analysis) continue;
         analyses.set(sourceIndex, analysis);
         if (analysis.problems.length > 0 || analysis.source !== source) requiresFiltering = true;
       }
@@ -159,7 +161,7 @@ function patchInvalidActiveEffectLikeRules(RuleElements) {
         const analysis = analyses.get(sourceIndex);
         if (analysis?.problems.length > 0) {
           for (const problem of analysis.problems) {
-            recordActiveEffectLikeIssue(item, sourceIndex, problem);
+            recordRuleElementIssue(item, sourceIndex, originalSource.key, problem);
           }
           continue;
         }
@@ -191,7 +193,7 @@ function patchInvalidActiveEffectLikeRules(RuleElements) {
     value: true
   });
 
-  return "ActiveEffectLike invalide";
+  return "Rule Elements invalides";
 }
 
 function patchDamageBaseSentinel(MoveClass) {
@@ -534,43 +536,16 @@ function collectDataIssues() {
       if (!Array.isArray(sourceRules)) continue;
 
       sourceRules.forEach((rule, ruleIndex) => {
-        if (rule?.key === "ActiveEffectLike") {
-          const analysis = analyzeActiveEffectLikeSource(rule, actor, item);
-          for (const problem of analysis.problems) {
-            issues.push({
-              ...base,
-              issue: problem.issue,
-              path: `system.rules.${ruleIndex}.${problem.field}`,
-              value: formatDiagnosticValue(problem.value),
-              details: problem.details
-            });
-          }
-        }
-
-        if (rule?.key !== "ApplyEffect") return;
-
-        const selectors = Array.isArray(rule.selectors) ? rule.selectors : [];
-        const resolvedSelectors = selectors
-          .map((selector) => resolveInjectedSelector(selector, actor, item, rule))
-          .filter((selector) => selector.length > 0);
-
-        if (resolvedSelectors.length === 0) {
+        const analysis = analyzeRuleElementSource(rule, actor, item);
+        if (!analysis) return;
+        for (const problem of analysis.problems) {
           issues.push({
             ...base,
-            issue: "APPLY_EFFECT_MISSING_SELECTORS",
-            path: `system.rules.${ruleIndex}.selectors`,
-            value: JSON.stringify(rule.selectors ?? null),
-            details: "Ajouter au moins un selector non vide et resolvable au Rule Element ApplyEffect."
-          });
-        }
-
-        if (typeof rule.uuid !== "string" || rule.uuid.trim().length === 0) {
-          issues.push({
-            ...base,
-            issue: "APPLY_EFFECT_MISSING_UUID",
-            path: `system.rules.${ruleIndex}.uuid`,
-            value: String(rule.uuid ?? ""),
-            details: "Ajouter l'UUID de l'Effect applique par le Rule Element ApplyEffect."
+            ruleKey: rule.key,
+            issue: problem.issue,
+            path: `system.rules.${ruleIndex}.${problem.field}`,
+            value: formatDiagnosticValue(problem.value),
+            details: problem.details
           });
         }
       });
@@ -583,6 +558,241 @@ function collectDataIssues() {
     || left.item.localeCompare(right.item)
     || left.path.localeCompare(right.path)
   );
+}
+
+function analyzeRuleElementSource(source, actor, item) {
+  switch (source?.key) {
+    case "ActiveEffectLike":
+      return analyzeActiveEffectLikeSource(source, actor, item);
+    case "ApplyEffect":
+      return analyzeApplyEffectSource(source, actor, item);
+    case "GrantItem":
+      return analyzeGrantItemSource(source, actor, item);
+    case "RollOption":
+      return analyzeRollOptionSource(source, actor, item);
+    default:
+      return null;
+  }
+}
+
+function analyzeApplyEffectSource(source, actor, item) {
+  const problems = [];
+  const uuid = typeof source?.uuid === "string" ? source.uuid.trim() : "";
+
+  if (!uuid) {
+    problems.push({
+      issue: "APPLY_EFFECT_MISSING_UUID",
+      field: "uuid",
+      value: source?.uuid,
+      details: "Ajouter l'UUID de l'Effect applique par le Rule Element ApplyEffect."
+    });
+  } else {
+    for (const missing of findUnresolvedInjections(source.uuid, actor, item, source)) {
+      problems.push({
+        issue: "APPLY_EFFECT_UNRESOLVED_INJECTION",
+        field: "uuid",
+        value: missing.token,
+        details: `La propriete injectee ${missing.token} est absente; l'Effect a appliquer ne peut pas etre resolu.`
+      });
+    }
+  }
+
+  const selectors = Array.isArray(source?.selectors) ? source.selectors : [];
+  let resolvedSelectorCount = 0;
+  for (const selector of selectors) {
+    if (typeof selector !== "string" || selector.trim().length === 0) {
+      problems.push({
+        issue: "APPLY_EFFECT_INVALID_SELECTOR",
+        field: "selectors",
+        value: selector,
+        details: "Chaque selector ApplyEffect doit etre une chaine non vide."
+      });
+      continue;
+    }
+
+    const resolution = resolveInjectedString(selector, actor, item, source);
+    for (const missing of resolution.unresolved) {
+      problems.push({
+        issue: "APPLY_EFFECT_UNRESOLVED_INJECTION",
+        field: "selectors",
+        value: missing.token,
+        details: `La propriete injectee ${missing.token} est absente; le selector ApplyEffect reste inactif.`
+      });
+    }
+    if (resolution.unresolved.length === 0 && resolution.value.trim().length > 0) {
+      resolvedSelectorCount += 1;
+    }
+  }
+
+  if (resolvedSelectorCount === 0) {
+    problems.push({
+      issue: "APPLY_EFFECT_MISSING_SELECTORS",
+      field: "selectors",
+      value: source?.selectors,
+      details: "Ajouter au moins un selector non vide et resolvable au Rule Element ApplyEffect."
+    });
+  }
+
+  return { source, problems: deduplicateRuleProblems(problems) };
+}
+
+function analyzeRollOptionSource(source, actor, item) {
+  const problems = [];
+  const domain = source?.domain === undefined
+    ? "all"
+    : typeof source.domain === "string" ? source.domain.trim() : "";
+  if (!domain || !ROLL_OPTION_DOMAIN_PATTERN.test(domain) || !/[a-z]/.test(domain)) {
+    problems.push({
+      issue: "ROLL_OPTION_INVALID_DOMAIN",
+      field: "domain",
+      value: source?.domain,
+      details: "Utiliser un domaine RollOption en minuscules contenant seulement lettres, chiffres et tirets."
+    });
+  }
+
+  if (typeof source?.option !== "string" || source.option.trim().length === 0) {
+    problems.push({
+      issue: "ROLL_OPTION_MISSING_OPTION",
+      field: "option",
+      value: source?.option,
+      details: "Ajouter une option RollOption non vide."
+    });
+  } else {
+    const resolution = resolveInjectedString(source.option, actor, item, source);
+    for (const missing of resolution.unresolved) {
+      problems.push({
+        issue: "ROLL_OPTION_UNRESOLVED_INJECTION",
+        field: "option",
+        value: missing.token,
+        details: `La propriete injectee ${missing.token} est absente; l'option ne peut pas etre construite.`
+      });
+    }
+    if (resolution.unresolved.length === 0 && sanitizeRollOption(resolution.value).length === 0) {
+      problems.push({
+        issue: "ROLL_OPTION_EMPTY_RESOLVED_OPTION",
+        field: "option",
+        value: source.option,
+        details: "L'option devient vide apres le nettoyage PTR; utiliser lettres, chiffres, deux-points ou tirets."
+      });
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(source ?? {}, "value")
+      && !["boolean", "string", "undefined"].includes(typeof source.value)) {
+    problems.push({
+      issue: "ROLL_OPTION_INVALID_VALUE",
+      field: "value",
+      value: source.value,
+      details: "La valeur RollOption doit etre un booleen, une chaine, ou etre omise."
+    });
+  }
+
+  if (source?.removeAfterRoll && item?.type !== "effect") {
+    problems.push({
+      issue: "ROLL_OPTION_INVALID_REMOVE_AFTER_ROLL",
+      field: "removeAfterRoll",
+      value: source.removeAfterRoll,
+      details: "removeAfterRoll est permis uniquement sur un Item de type effect."
+    });
+  }
+
+  return { source, problems: deduplicateRuleProblems(problems) };
+}
+
+function analyzeGrantItemSource(source, actor, item) {
+  const problems = [];
+  const uuid = typeof source?.uuid === "string" ? source.uuid.trim() : "";
+  if (!uuid) {
+    problems.push({
+      issue: "GRANT_ITEM_MISSING_UUID",
+      field: "uuid",
+      value: source?.uuid,
+      details: "Ajouter l'UUID de l'Item accorde par le Rule Element GrantItem."
+    });
+  } else {
+    for (const missing of findUnresolvedInjections(source.uuid, actor, item, source)) {
+      problems.push({
+        issue: "GRANT_ITEM_UNRESOLVED_INJECTION",
+        field: "uuid",
+        value: missing.token,
+        details: `La propriete injectee ${missing.token} est absente; l'Item a accorder ne peut pas etre resolu.`
+      });
+    }
+  }
+
+  if (source?.reevaluateOnUpdate === true && !hasRulePredicate(source.predicate)) {
+    problems.push({
+      issue: "GRANT_ITEM_REEVALUATE_WITHOUT_PREDICATE",
+      field: "reevaluateOnUpdate",
+      value: source.reevaluateOnUpdate,
+      details: "Ajouter un predicate ou desactiver reevaluateOnUpdate. PTR refuse cette combinaison."
+    });
+  }
+
+  if (source?.modifications !== undefined && !Array.isArray(source.modifications)) {
+    problems.push({
+      issue: "GRANT_ITEM_INVALID_MODIFICATIONS",
+      field: "modifications",
+      value: source.modifications,
+      details: "modifications doit etre une liste de modifications structurees."
+    });
+  }
+
+  for (const modification of Array.isArray(source?.modifications) ? source.modifications : []) {
+    if (!modification || typeof modification !== "object") {
+      problems.push({
+        issue: "GRANT_ITEM_INVALID_MODIFICATION",
+        field: "modifications",
+        value: modification,
+        details: "Chaque modification GrantItem doit etre un objet structure."
+      });
+      continue;
+    }
+    if (typeof modification.key !== "string" || modification.key.trim().length === 0) {
+      problems.push({
+        issue: "GRANT_ITEM_INVALID_MODIFICATION_KEY",
+        field: "modifications",
+        value: modification.key,
+        details: "Chaque modification GrantItem doit avoir un chemin key non vide."
+      });
+    }
+    const operation = modification.operation ?? "override";
+    if (!GRANT_ITEM_OPERATIONS.has(operation)) {
+      problems.push({
+        issue: "GRANT_ITEM_INVALID_MODIFICATION_OPERATION",
+        field: "modifications",
+        value: operation,
+        details: `Choisir une operation GrantItem valide: ${Array.from(GRANT_ITEM_OPERATIONS).join(", ")}.`
+      });
+    }
+    if (modification.value !== undefined && typeof modification.value !== "string") {
+      problems.push({
+        issue: "GRANT_ITEM_INVALID_MODIFICATION_VALUE",
+        field: "modifications",
+        value: modification.value,
+        details: "La valeur structuree d'une modification GrantItem doit etre une chaine."
+      });
+    }
+  }
+
+  return { source, problems: deduplicateRuleProblems(problems) };
+}
+
+function hasRulePredicate(predicate) {
+  if (Array.isArray(predicate)) return predicate.length > 0;
+  if (predicate && typeof predicate.length === "number") return predicate.length > 0;
+  if (predicate && Object.prototype.toString.call(predicate) === "[object Object]") {
+    return Object.keys(predicate).length > 0;
+  }
+  return false;
+}
+
+function sanitizeRollOption(option) {
+  return String(option ?? "")
+    .replace(/[^-:\w]/g, "")
+    .replace(/:+/g, ":")
+    .replace(/-+/g, "-")
+    .trim();
 }
 
 function analyzeActiveEffectLikeSource(source, actor, item) {
@@ -711,8 +921,9 @@ function deduplicateRuleProblems(problems) {
   ).values());
 }
 
-function recordActiveEffectLikeIssue(item, ruleIndex, problem) {
+function recordRuleElementIssue(item, ruleIndex, ruleKey, problem) {
   return recordRuntimeIssue(item, {
+    ruleKey,
     issue: problem.issue,
     path: `system.rules.${ruleIndex}.${problem.field}`,
     value: formatDiagnosticValue(problem.value),
@@ -762,6 +973,7 @@ function recordRuntimeIssue(move, issueData) {
     itemType: move?.type ?? "move",
     damageBase: move?.system?.damageBase ?? "",
     frequencyType: move?.system?.frequency?.type ?? "",
+    ruleKey: issueData.ruleKey ?? "",
     issue: issueData.issue,
     path: issueData.path,
     value: issueData.value,

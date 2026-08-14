@@ -69,6 +69,8 @@ class RuleElements {
   static custom = {};
   static builtin = {
     ActiveEffectLike: TestRuleElement,
+    ApplyEffect: TestRuleElement,
+    GrantItem: TestRuleElement,
     RollOption: TestRuleElement
   };
   static originalCalls = 0;
@@ -158,6 +160,37 @@ const invalidPathRuleItem = makeRuleItem("BADPATH", "Chemin absent", [{
   path: "system.chemin.qui.nexiste.pas",
   value: 1
 }]);
+const validApplyEffectItem = makeRuleItem("VALIDAPPLY", "ApplyEffect valide", [{
+  key: "ApplyEffect",
+  uuid: "Item.EFFECT1",
+  selectors: ["attack"]
+}]);
+const invalidApplyEffectItem = makeRuleItem("BADAPPLY", "ApplyEffect sans selector", [{
+  key: "ApplyEffect",
+  uuid: "Item.EFFECT1",
+  selectors: [undefined]
+}]);
+const validRollOptionItem = makeRuleItem("VALIDROLL", "RollOption valide", [{
+  key: "RollOption",
+  option: "weapon:fire"
+}]);
+const invalidRollOptionItem = makeRuleItem("BADROLL", "RollOption vide", [{
+  key: "RollOption",
+  domain: "all",
+  option: "!!!"
+}]);
+const validGrantItemItem = makeRuleItem("VALIDGRANT", "GrantItem valide", [{
+  key: "GrantItem",
+  uuid: "Item.GRANTED1",
+  reevaluateOnUpdate: true,
+  predicate: ["feature:enabled"]
+}]);
+const invalidGrantItemItem = makeRuleItem("BADGRANT", "GrantItem sans predicate", [{
+  key: "GrantItem",
+  uuid: "Item.GRANTED1",
+  reevaluateOnUpdate: true,
+  predicate: []
+}]);
 actor.items.contents.push(
   validMove,
   invalidFrequencyMove,
@@ -166,7 +199,13 @@ actor.items.contents.push(
   unresolvedRuleItem,
   injectedRuleItem,
   incompleteRuleItem,
-  invalidPathRuleItem
+  invalidPathRuleItem,
+  validApplyEffectItem,
+  invalidApplyEffectItem,
+  validRollOptionItem,
+  invalidRollOptionItem,
+  validGrantItemItem,
+  invalidGrantItemItem
 );
 
 const moduleRecord = {};
@@ -231,7 +270,7 @@ vm.runInContext(source, context, { filename: "scripts/main.js" });
 assert.equal(typeof initCallback, "function");
 initCallback();
 
-assert.equal(moduleRecord.api.version, "0.4.0");
+assert.equal(moduleRecord.api.version, "0.5.0");
 assert.equal(invalidDamageBaseMove.isDamaging, false, "DB '-' doit etre non dommageant");
 assert.equal(validMove.isDamaging, true);
 
@@ -260,6 +299,10 @@ assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_UNRESOLVED_INJECTIO
 assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_MISSING_PATH" && row.itemUuid.endsWith("INCOMPLETE")), true);
 assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_EMPTY_VALUE" && row.itemUuid.endsWith("INCOMPLETE")), true);
 assert.equal(dataIssues.some((row) => row.issue === "AE_LIKE_INVALID_PATH" && row.itemUuid.endsWith("BADPATH")), true);
+assert.equal(dataIssues.some((row) => row.issue === "APPLY_EFFECT_MISSING_SELECTORS" && row.itemUuid.endsWith("BADAPPLY")), true);
+assert.equal(dataIssues.some((row) => row.issue === "APPLY_EFFECT_INVALID_SELECTOR" && row.itemUuid.endsWith("BADAPPLY")), true);
+assert.equal(dataIssues.some((row) => row.issue === "ROLL_OPTION_EMPTY_RESOLVED_OPTION" && row.itemUuid.endsWith("BADROLL")), true);
+assert.equal(dataIssues.some((row) => row.issue === "GRANT_ITEM_REEVALUATE_WITHOUT_PREDICATE" && row.itemUuid.endsWith("BADGRANT")), true);
 
 const originalCallsBeforeValidRule = RuleElements.originalCalls;
 assert.equal(RuleElements.fromOwnedItem(validRuleItem).length, 1);
@@ -270,6 +313,12 @@ assert.equal(injectedRules.length, 1);
 assert.equal(injectedRules[0].source.path, "system.modifiers.baseStats.speed.mod", "Un chemin injectable valide est resolu avant PTR");
 assert.equal(RuleElements.fromOwnedItem(incompleteRuleItem).length, 0, "Une regle incomplete ne declenche plus l'erreur DataModel repetee");
 assert.equal(RuleElements.fromOwnedItem(invalidPathRuleItem).length, 0, "Un chemin Actor invalide reste inactif sans spam");
+assert.equal(RuleElements.fromOwnedItem(validApplyEffectItem).length, 1, "Un ApplyEffect valide conserve le comportement PTR");
+assert.equal(RuleElements.fromOwnedItem(invalidApplyEffectItem).length, 0, "Un ApplyEffect sans selector est garde inactif");
+assert.equal(RuleElements.fromOwnedItem(validRollOptionItem).length, 1, "Un RollOption valide conserve le comportement PTR");
+assert.equal(RuleElements.fromOwnedItem(invalidRollOptionItem).length, 0, "Un RollOption vide est garde inactif");
+assert.equal(RuleElements.fromOwnedItem(validGrantItemItem).length, 1, "Un GrantItem valide conserve le comportement PTR");
+assert.equal(RuleElements.fromOwnedItem(invalidGrantItemItem).length, 0, "Un GrantItem reevalue sans predicate est garde inactif");
 
 let struggleUseCalls = 0;
 const temporaryStruggle = new Move({
@@ -325,6 +374,21 @@ assert.equal(observedRuleIssues.some((row) =>
   row.issue === "AE_LIKE_UNRESOLVED_INJECTION"
   && row.actorUuid === "Actor.ACTOR1"
   && row.itemUuid.endsWith("UNRESOLVED")
+), true);
+assert.equal(observedRuleIssues.some((row) =>
+  row.ruleKey === "ApplyEffect"
+  && row.issue === "APPLY_EFFECT_MISSING_SELECTORS"
+  && row.itemUuid.endsWith("BADAPPLY")
+), true);
+assert.equal(observedRuleIssues.some((row) =>
+  row.ruleKey === "RollOption"
+  && row.issue === "ROLL_OPTION_EMPTY_RESOLVED_OPTION"
+  && row.itemUuid.endsWith("BADROLL")
+), true);
+assert.equal(observedRuleIssues.some((row) =>
+  row.ruleKey === "GrantItem"
+  && row.issue === "GRANT_ITEM_REEVALUATE_WITHOUT_PREDICATE"
+  && row.itemUuid.endsWith("BADGRANT")
 ), true);
 
 assert.equal(invalidFrequencyMove.item, invalidFrequencyMove);
