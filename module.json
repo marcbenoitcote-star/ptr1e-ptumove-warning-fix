@@ -1,16 +1,16 @@
 {
   "id": "ptr1e-ptumove-warning-fix",
   "title": "PTR1e PTUMove Warning Fix",
-  "description": "Fixes repeated PTUMove warnings, invalid DB sentinels and attack-blocking frequency errors for PTR 4.4.3.37, with Actor/Item diagnostics and no world-data mutation.",
+  "description": "Fixes repeated PTUMove warnings, trainer-sheet Struggles, invalid DB/frequency data and repeated invalid ActiveEffectLike errors for PTR 4.4.3.37, with read-only Actor/Item diagnostics.",
   "authors": [
     {
       "name": "Pokemon PTU Custom Server"
     }
   ],
-  "version": "0.3.0",
+  "version": "0.4.0",
   "url": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix",
   "manifest": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix/releases/latest/download/module.json",
-  "download": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix/releases/download/v0.3.0/module.zip",
+  "download": "https://github.com/marcbenoitcote-star/ptr1e-ptumove-warning-fix/releases/download/v0.4.0/module.zip",
   "compatibility": {
     "minimum": "13.345",
     "verified": "13.350"
