@@ -270,7 +270,7 @@ vm.runInContext(source, context, { filename: "scripts/main.js" });
 assert.equal(typeof initCallback, "function");
 initCallback();
 
-assert.equal(moduleRecord.api.version, "0.5.0");
+assert.equal(moduleRecord.api.version, "0.5.1");
 assert.equal(invalidDamageBaseMove.isDamaging, false, "DB '-' doit etre non dommageant");
 assert.equal(validMove.isDamaging, true);
 
@@ -304,21 +304,25 @@ assert.equal(dataIssues.some((row) => row.issue === "APPLY_EFFECT_INVALID_SELECT
 assert.equal(dataIssues.some((row) => row.issue === "ROLL_OPTION_EMPTY_RESOLVED_OPTION" && row.itemUuid.endsWith("BADROLL")), true);
 assert.equal(dataIssues.some((row) => row.issue === "GRANT_ITEM_REEVALUATE_WITHOUT_PREDICATE" && row.itemUuid.endsWith("BADGRANT")), true);
 
-const originalCallsBeforeValidRule = RuleElements.originalCalls;
-assert.equal(RuleElements.fromOwnedItem(validRuleItem).length, 1);
-assert.equal(RuleElements.originalCalls, originalCallsBeforeValidRule + 1, "Une regle valide conserve la methode PTR originale");
-assert.equal(RuleElements.fromOwnedItem(unresolvedRuleItem).length, 0, "Une injection absente est gardee inactive sans construire la regle");
-const injectedRules = RuleElements.fromOwnedItem(injectedRuleItem);
-assert.equal(injectedRules.length, 1);
-assert.equal(injectedRules[0].source.path, "system.modifiers.baseStats.speed.mod", "Un chemin injectable valide est resolu avant PTR");
-assert.equal(RuleElements.fromOwnedItem(incompleteRuleItem).length, 0, "Une regle incomplete ne declenche plus l'erreur DataModel repetee");
-assert.equal(RuleElements.fromOwnedItem(invalidPathRuleItem).length, 0, "Un chemin Actor invalide reste inactif sans spam");
-assert.equal(RuleElements.fromOwnedItem(validApplyEffectItem).length, 1, "Un ApplyEffect valide conserve le comportement PTR");
-assert.equal(RuleElements.fromOwnedItem(invalidApplyEffectItem).length, 0, "Un ApplyEffect sans selector est garde inactif");
-assert.equal(RuleElements.fromOwnedItem(validRollOptionItem).length, 1, "Un RollOption valide conserve le comportement PTR");
-assert.equal(RuleElements.fromOwnedItem(invalidRollOptionItem).length, 0, "Un RollOption vide est garde inactif");
-assert.equal(RuleElements.fromOwnedItem(validGrantItemItem).length, 1, "Un GrantItem valide conserve le comportement PTR");
-assert.equal(RuleElements.fromOwnedItem(invalidGrantItemItem).length, 0, "Un GrantItem reevalue sans predicate est garde inactif");
+const originalFromOwnedItem = RuleElements.fromOwnedItem;
+const originalCallsBeforeRules = RuleElements.originalCalls;
+for (const item of [
+  validRuleItem,
+  unresolvedRuleItem,
+  injectedRuleItem,
+  incompleteRuleItem,
+  invalidPathRuleItem,
+  validApplyEffectItem,
+  invalidApplyEffectItem,
+  validRollOptionItem,
+  invalidRollOptionItem,
+  validGrantItemItem,
+  invalidGrantItemItem
+]) {
+  assert.equal(RuleElements.fromOwnedItem(item).length, 1, `${item.name} reste confie a PTR sans filtrage du module`);
+}
+assert.equal(RuleElements.fromOwnedItem, originalFromOwnedItem, "Le module ne remplace pas RuleElements.fromOwnedItem");
+assert.equal(RuleElements.originalCalls, originalCallsBeforeRules + 11, "Toutes les regles passent par la methode PTR originale");
 
 let struggleUseCalls = 0;
 const temporaryStruggle = new Move({
@@ -368,28 +372,6 @@ await clickHandlers[0]({
   stopImmediatePropagation() { throw new Error("Le correctif Struggle ne doit pas intercepter un Move normal"); }
 });
 assert.equal(normalMoveUseCalls, 0, "Un Move permanent n'est pas lance une seconde fois par le correctif Struggle");
-
-const observedRuleIssues = moduleRecord.api.reportRuntimeIssues();
-assert.equal(observedRuleIssues.some((row) =>
-  row.issue === "AE_LIKE_UNRESOLVED_INJECTION"
-  && row.actorUuid === "Actor.ACTOR1"
-  && row.itemUuid.endsWith("UNRESOLVED")
-), true);
-assert.equal(observedRuleIssues.some((row) =>
-  row.ruleKey === "ApplyEffect"
-  && row.issue === "APPLY_EFFECT_MISSING_SELECTORS"
-  && row.itemUuid.endsWith("BADAPPLY")
-), true);
-assert.equal(observedRuleIssues.some((row) =>
-  row.ruleKey === "RollOption"
-  && row.issue === "ROLL_OPTION_EMPTY_RESOLVED_OPTION"
-  && row.itemUuid.endsWith("BADROLL")
-), true);
-assert.equal(observedRuleIssues.some((row) =>
-  row.ruleKey === "GrantItem"
-  && row.issue === "GRANT_ITEM_REEVALUATE_WITHOUT_PREDICATE"
-  && row.itemUuid.endsWith("BADGRANT")
-), true);
 
 assert.equal(invalidFrequencyMove.item, invalidFrequencyMove);
 assert.equal(moduleRecord.api.reportAccesses()[0].itemUuid, "Actor.ACTOR1.Item.BADFREQ");
