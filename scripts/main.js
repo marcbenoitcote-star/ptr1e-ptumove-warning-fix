@@ -1,12 +1,11 @@
 const MODULE_ID = "ptr1e-ptumove-warning-fix";
-const MODULE_VERSION = "0.5.0";
+const MODULE_VERSION = "0.5.1";
 const SUPPORTED_SYSTEM_VERSION = "4.4.3.37";
 const ITEM_PATCH_FLAG = Symbol.for(`${MODULE_ID}.item-patched`);
 const DAMAGE_BASE_PATCH_FLAG = Symbol.for(`${MODULE_ID}.damage-base-patched`);
 const CONSUME_PATCH_FLAG = Symbol.for(`${MODULE_ID}.consume-patched`);
 const COOLDOWN_PATCH_FLAG = Symbol.for(`${MODULE_ID}.cooldown-patched`);
 const STRUGGLE_SHEET_PATCH_FLAG = Symbol.for(`${MODULE_ID}.struggle-sheet-patched`);
-const RULE_ELEMENTS_PATCH_FLAG = Symbol.for(`${MODULE_ID}.rule-elements-patched`);
 const deprecatedAccesses = new Map();
 const runtimeIssues = new Map();
 const struggleUses = new Map();
@@ -38,8 +37,7 @@ Hooks.once("init", () => {
     patchDamageBaseSentinel(MoveClass),
     patchInvalidFrequencyConsumption(MoveClass),
     patchInvalidFrequencyCooldown(MoveClass),
-    patchCharacterStruggleUse(CONFIG.PTU?.Actor?.sheetClasses?.character),
-    patchInvalidRuleElements(CONFIG.PTU?.rule?.elements)
+    patchCharacterStruggleUse(CONFIG.PTU?.Actor?.sheetClasses?.character)
   ].filter(Boolean);
 
   if (appliedPatches.length > 0) {
@@ -120,80 +118,6 @@ function patchCharacterStruggleUse(CharacterSheetClass) {
   });
 
   return "Struggle de la fiche Dresseur";
-}
-
-function patchInvalidRuleElements(RuleElements) {
-  if (!RuleElements || RuleElements[RULE_ELEMENTS_PATCH_FLAG]) return null;
-
-  const descriptor = Object.getOwnPropertyDescriptor(RuleElements, "fromOwnedItem");
-  if (typeof descriptor?.value !== "function" || descriptor.configurable !== true) {
-    console.warn(`${MODULE_ID} | RuleElements.fromOwnedItem did not match PTR 4.4.3.37; invalid rules were not patched.`);
-    return null;
-  }
-
-  const originalFromOwnedItem = descriptor.value;
-  Object.defineProperty(RuleElements, "fromOwnedItem", {
-    configurable: true,
-    writable: true,
-    value(item, options = {}) {
-      const entries = Array.from(item?.system?.rules?.entries?.() ?? []);
-      const analyses = new Map();
-      let requiresFiltering = false;
-
-      for (const [sourceIndex, source] of entries) {
-        const analysis = analyzeRuleElementSource(source, item?.actor ?? item?.parent, item);
-        if (!analysis) continue;
-        analyses.set(sourceIndex, analysis);
-        if (analysis.problems.length > 0 || analysis.source !== source) requiresFiltering = true;
-      }
-
-      if (!requiresFiltering) {
-        return Reflect.apply(originalFromOwnedItem, this, [item, options]);
-      }
-
-      const rules = [];
-      for (const [sourceIndex, originalSource] of entries) {
-        if (typeof originalSource?.key !== "string") {
-          console.error(`PTU | RuleElements | Invalid rule key: ${originalSource?.key} on item ${item.name} (${item.uuid})`);
-          continue;
-        }
-
-        const analysis = analyses.get(sourceIndex);
-        if (analysis?.problems.length > 0) {
-          for (const problem of analysis.problems) {
-            recordRuleElementIssue(item, sourceIndex, originalSource.key, problem);
-          }
-          continue;
-        }
-
-        const source = analysis?.source ?? originalSource;
-        const RuleElementDocument = this.custom[source.key] ?? this.builtin[source.key];
-        if (RuleElementDocument) {
-          const rule = (() => {
-            try {
-              return new RuleElementDocument(source, item, { ...(options ?? {}), sourceIndex });
-            } catch (error) {
-              if (!options.suppressWarnings) {
-                console.warn(`PTU | RuleElements | Error creating rule element: ${source.key} on item ${item.name} (${item.uuid})`, error);
-              }
-              return null;
-            }
-          })();
-          if (rule) rules.push(rule);
-        } else {
-          console.warn(`PTU | RuleElements | Unrecognized rule element: ${source.key} on item ${item.name} (${item.uuid})`);
-        }
-      }
-      return rules;
-    }
-  });
-
-  Object.defineProperty(RuleElements, RULE_ELEMENTS_PATCH_FLAG, {
-    configurable: true,
-    value: true
-  });
-
-  return "Rule Elements invalides";
 }
 
 function patchDamageBaseSentinel(MoveClass) {
@@ -919,17 +843,6 @@ function deduplicateRuleProblems(problems) {
   return Array.from(new Map(
     problems.map((problem) => [`${problem.issue}|${problem.field}|${formatDiagnosticValue(problem.value)}`, problem])
   ).values());
-}
-
-function recordRuleElementIssue(item, ruleIndex, ruleKey, problem) {
-  return recordRuntimeIssue(item, {
-    ruleKey,
-    issue: problem.issue,
-    path: `system.rules.${ruleIndex}.${problem.field}`,
-    value: formatDiagnosticValue(problem.value),
-    trigger: "prepareRuleElements",
-    details: problem.details
-  });
 }
 
 function formatDiagnosticValue(value) {

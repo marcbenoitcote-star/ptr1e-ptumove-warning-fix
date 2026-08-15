@@ -12,16 +12,16 @@ PTUMove#item is deprecated. The collection now contains PTUMove items directly; 
 
 Dans PTR 4.4.3.37, le getter obsolete `PTUMove#item` affiche un avertissement puis retourne simplement le mouvement lui-meme. Ce module conserve exactement ce resultat (`return this`) mais retire l'appel qui produit l'avertissement.
 
-La version 0.5.0 memorise silencieusement les acces obsoletes et ajoute des garde-fous cibles :
+La version 0.5.1 memorise silencieusement les acces obsoletes et ajoute des garde-fous cibles :
 
 - un DB egal a `"-"` est traite comme un Move sans degats au lieu d'etre evalue comme une formule invalide ;
 - une frequence absente ou inconnue ne bloque plus l'envoi de l'attaque et des degats. Le Move continue sans consommer sa frequence et la console indique les donnees a corriger ;
 - le Struggle temporaire d'un Dresseur est retrouve dans `actor.attacks`, comme sur la fiche Pokemon, au lieu d'etre cherche uniquement parmi les Items permanents ;
-- un Rule Element invalide parmi `ActiveEffectLike`, `ApplyEffect`, `GrantItem` et `RollOption` est laisse inactif sans reconstruire et reafficher la meme erreur a chaque preparation de l'Actor.
+- l'audit en lecture seule signale les Rule Elements suspects parmi `ActiveEffectLike`, `ApplyEffect`, `GrantItem` et `RollOption`, avec l'Actor, l'Item et leurs UUID.
 
 Aucun Actor, Item ou Rule Element n'est modifie automatiquement.
 
-Le filtrage couvre les schemas `ActiveEffectLike` incomplets, les `ApplyEffect` sans selector ou UUID utilisable, les `GrantItem` reevalues sans predicate et les `RollOption` dont le domaine ou l'option est invalide. Les choix injectes absents, chemins Actor invalides et formules vides restent aussi diagnostiques. Les erreurs sont memorisees une seule fois par Actor, Item, index de regle et valeur, avec un compteur de repetitions. Si le choix ou la donnee est corrige plus tard, la regle est automatiquement acceptee lors de la prochaine preparation de l'Actor.
+Le module ne remplace plus `RuleElements.fromOwnedItem` et ne filtre aucune regle pendant la preparation des Actors. `ActiveEffectLike`, `ApplyEffect`, `GrantItem` et `RollOption` sont entierement executes par PTR 4.4.3.37. L'audit couvre toujours les schemas incomplets, les choix injectes absents, les chemins Actor invalides et les formules vides, sans modifier les documents ni le cycle d'execution du systeme.
 
 Le correctif refuse de s'activer avec une autre version du systeme afin de ne pas masquer un changement ulterieur de PTR.
 
@@ -88,9 +88,9 @@ game.modules.get("ptr1e-ptumove-warning-fix").api.clearRuntimeIssues()
 - Aucun message `resolveDbFormula: failed to evaluate formula "-"`.
 - Un Move avec un DB valide continue jusqu'aux degats meme si sa frequence est invalide.
 - Le clic sur un Struggle dans une fiche Dresseur lance l'attaque temporaire.
-- Les `ActiveEffectLike`, `ApplyEffect`, `GrantItem` et `RollOption` invalides ne saturent plus la console a chaque recalcul d'Actor.
+- Les `ActiveEffectLike`, `ApplyEffect`, `GrantItem` et `RollOption` valides restent appliques par le moteur PTR officiel.
 - Un rapport manuel donnant le nom et l'UUID des Actors et Items concernes.
 - Les mouvements, jets et degats continuent de fonctionner normalement.
 - Le systeme actif reste `ptu` version `4.4.3.37`.
 
-Le module reduit le bruit et la charge de preparation, mais il ne devine pas les choix de classe manquants et ne repare pas automatiquement les donnees. L'audit indique les documents a corriger pour restaurer ensuite l'automatisation de chaque regle.
+Le module reduit le bruit lie a `PTUMove#item`, mais il ne masque plus les erreurs de Rule Elements du systeme. Une donnee invalide peut donc encore produire un avertissement PTR. L'audit indique alors le document a corriger sans desactiver les autres regles.
